@@ -74,6 +74,40 @@ contract MarketCreatorTest is Test {
         vm.stopPrank();
     }
 
+    function testTraderCanCreateMarket() public {
+        uint256 traderLiquidity = 500 * 10 ** 6;
+
+        // Trader1 approves the MarketCreator to spend their USDC
+        vm.startPrank(trader1);
+        collateral.approve(address(marketCreator), traderLiquidity);
+
+        // Trader1 calls createMarket
+        (bytes32 condId, uint256 yesId, uint256 noId) =
+            marketCreator.createMarket(questionText, address(oracleResolver), traderLiquidity);
+
+        vm.stopPrank();
+
+        // Verify that the condition was prepared
+        bool isPrepared = ctf.conditionPrepared(condId);
+        assertTrue(isPrepared, "Condition was not prepared by trader");
+
+        // Verify the tokens minted to trader1
+        uint256 yesBalance = ctf.balanceOf(trader1, yesId);
+        uint256 noBalance = ctf.balanceOf(trader1, noId);
+        assertEq(yesBalance, traderLiquidity, "Trader did not receive correct YES tokens");
+        assertEq(noBalance, traderLiquidity, "Trader did not receive correct NO tokens");
+
+        // And confirm it was registered on the exchange
+        (uint256 complement, bytes32 registeredCondId) = exchange.registry(yesId);
+        assertEq(complement, noId, "YES token complement mismatch");
+        assertEq(registeredCondId, condId, "YES token conditionId mismatch");
+
+        // Similarly for the NO token
+        (complement, registeredCondId) = exchange.registry(noId);
+        assertEq(complement, yesId, "NO token complement mismatch");
+        assertEq(registeredCondId, condId, "NO token conditionId mismatch");
+    }
+
     function testMarketCreation() public {
         vm.startPrank(admin);
 
