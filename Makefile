@@ -1,5 +1,5 @@
 # Include environment variables from the selected environment file
--include .env.$(ENV)
+-include .env
 
 # Default to local environment if not specified
 RPC_URL ?= http://localhost:8545
@@ -94,6 +94,15 @@ deploy-all:
 		--rpc-url $(RPC_URL) \
 		--private-key $(PK) \
 		--broadcast
+
+
+deploy-all-sei:
+	forge script script/DeployAll.s.sol:DeployAll \
+	--rpc-url https://evm-rpc-testnet.sei-apis.com \
+	--chain-id ${CHAIN_ID} \
+	--private-key ${PRIVATE_KEY} \
+	--broadcast
+
 
 # Default
 all: clean build test
