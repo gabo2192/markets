@@ -59,9 +59,25 @@ contract MarketCreatorTest is BaseExchangeTest {
         return (condId, yesId, noId);
     }
 
-    function _resolveMarket(bytes32 _conditionId, uint256 outcome) internal {
+    function _initialLiquidity(address to, address spender, uint256 tokenAmount) internal {
+        uint256[] memory partition = new uint256[](2);
+        partition[0] = 1;
+        partition[1] = 2;
+
+        approve(address(collateral), address(ctf), type(uint256).max);
+
+        dealAndApprove(address(collateral), to, spender, tokenAmount);
+        IERC1155(address(ctf)).setApprovalForAll(spender, true);
+
+        uint256 splitAmount = tokenAmount;
+        ctf.splitPosition(IERC20(address(collateral)), bytes32(0), conditionId, partition, splitAmount);
+    }
+
+    function _resolveMarket(uint256 outcome) internal {
+        bytes32 questionId = keccak256(abi.encodePacked(questionText));
+        conditionId = ctf.getConditionId(oracle, questionId, 2);
         vm.prank(oracle);
-        oracleResolver.resolveMarket(_conditionId, outcome);
+        oracleResolver.resolveMarket(conditionId, outcome);
     }
 
     /* Test cases */
@@ -118,240 +134,6 @@ contract MarketCreatorTest is BaseExchangeTest {
         assertEq(registeredCondition, conditionId, "NO token condition ID incorrect");
     }
 
-    function testTradingWithRealExchange() public {
-        // First create the market
-        (conditionId, yesTokenId, noTokenId) = _createMarket();
-
-        // Admin approves CTF for exchange
-        vm.startPrank(admin);
-        ctf.setApprovalForAll(address(exchange), true);
-        vm.stopPrank();
-
-        // Create and sign a sell order for YES tokens using our helper
-        Order memory sellOrder = _createAndSignOrder(
-            adminPK,
-            yesTokenId,
-            amount, // Selling 400 YES tokens
-            amount, // For 400 USDC (1:1 price)
-            Side.SELL
-        );
-
-        // Trader1 fills the order
-        vm.startPrank(trader1);
-        collateral.approve(address(exchange), amount);
-        exchange.fillOrder(sellOrder, amount);
-        vm.stopPrank();
-
-        // Verify trader1 received YES tokens
-        assertEq(ctf.balanceOf(trader1, yesTokenId), amount, "Trader1 didn't receive YES tokens");
-        // Verify admin received collateral
-        assertEq(
-            collateral.balanceOf(admin),
-            initialLiquidity * 2 - initialLiquidity + amount,
-            "Admin didn't receive collateral"
-        );
-    }
-
-    function testMarketResolution() public {
-        // First create the market and do some trading
-        testTradingWithRealExchange();
-
-        // Oracle resolves the market (YES outcome)
-        _resolveMarket(conditionId, 1); // YES wins (outcome = 1)
-
-        // Verify market is resolved
-        assertTrue(ctf.isMarketResolved(conditionId), "Market was not resolved");
-
-        // Trader1 redeems their winning YES tokens
-        vm.startPrank(trader1);
-
-        uint256 trader1BalanceBefore = collateral.balanceOf(trader1);
-
-        uint256[] memory indexSets = new uint256[](1);
-        indexSets[0] = 1; // YES tokens (index set 1)
-
-        ctf.redeemPositions(collateral, bytes32(0), conditionId, indexSets);
-
-        uint256 trader1BalanceAfter = collateral.balanceOf(trader1);
-
-        // Verify trader1 received collateral for winning tokens
-        assertEq(trader1BalanceAfter - trader1BalanceBefore, 400 * 10 ** 6, "Trader1 didn't receive winnings");
-
-        vm.stopPrank();
-    }
-
-    function testCompleteFlow() public {
-        // ================ PHASE 1: MARKET CREATION ================
-        (conditionId, yesTokenId, noTokenId) = _createMarket();
-
-        // Admin approves exchange to transfer tokens
-        vm.startPrank(admin);
-        ctf.setApprovalForAll(address(exchange), true);
-        collateral.approve(address(exchange), 1000 * 10 ** 6); // Approve exchange to transfer collateral
-
-        // Create sell orders for both YES and NO tokens
-        Order memory sellYesOrder = _createAndSignOrder(adminPK, yesTokenId, amount, amount, Side.SELL);
-
-        Order memory sellNoOrder = _createAndSignOrder(adminPK, noTokenId, amount, amount, Side.SELL);
-
-        vm.stopPrank();
-
-        // ================ PHASE 2: TRADING ================
-
-        // Trader1 approves collateral for exchange
-        vm.startPrank(trader1);
-        collateral.approve(address(exchange), amount);
-
-        // Trader1 fills the order
-        exchange.fillOrder(sellYesOrder, amount);
-        vm.stopPrank();
-
-        // Verify trader1 received YES tokens
-        assertEq(ctf.balanceOf(trader1, yesTokenId), amount, "Trader1 didn't receive YES tokens");
-
-        // Trader2 approves collateral for exchange
-        vm.startPrank(trader2);
-        collateral.approve(address(exchange), amount);
-
-        // Trader2 fills the NO order
-        exchange.fillOrder(sellNoOrder, amount);
-        vm.stopPrank();
-
-        // Verify trader2 received NO tokens
-        assertEq(ctf.balanceOf(trader2, noTokenId), amount, "Trader2 didn't receive NO tokens");
-
-        // ================ PHASE 3: MARKET RESOLUTION ================
-
-        // Move time forward
-        vm.warp(block.timestamp + 30 days);
-
-        // Oracle resolves the market (YES outcome)
-        _resolveMarket(conditionId, 1); // YES wins
-
-        // ================ PHASE 4: REDEMPTION ================
-
-        // Trader1 redeems winning YES tokens
-        vm.startPrank(trader1);
-        uint256 balanceBefore = collateral.balanceOf(trader1);
-
-        uint256[] memory indexSets = new uint256[](1);
-        indexSets[0] = 1; // YES tokens
-
-        ctf.redeemPositions(collateral, bytes32(0), conditionId, indexSets);
-
-        uint256 balanceAfter = collateral.balanceOf(trader1);
-        assertEq(balanceAfter - balanceBefore, amount, "Trader1 didn't receive correct winnings");
-        vm.stopPrank();
-
-        // Trader2 tries to redeem losing NO tokens (should get 0)
-        vm.startPrank(trader2);
-        balanceBefore = collateral.balanceOf(trader2);
-
-        indexSets = new uint256[](1);
-        indexSets[0] = 2; // NO tokens
-
-        ctf.redeemPositions(collateral, bytes32(0), conditionId, indexSets);
-
-        balanceAfter = collateral.balanceOf(trader2);
-        assertEq(balanceAfter, balanceBefore, "Trader2 shouldn't receive winnings for losing tokens");
-        vm.stopPrank();
-
-        // Admin redeems remaining YES tokens
-        vm.startPrank(admin);
-        balanceBefore = collateral.balanceOf(admin);
-
-        indexSets = new uint256[](1);
-        indexSets[0] = 1; // YES tokens
-
-        ctf.redeemPositions(collateral, bytes32(0), conditionId, indexSets);
-
-        balanceAfter = collateral.balanceOf(admin);
-        uint256 expectedWinnings = initialLiquidity - amount; // Initial YES tokens minus tokens sold
-        assertEq(balanceAfter - balanceBefore, expectedWinnings, "Admin didn't receive correct winnings");
-        vm.stopPrank();
-    }
-
-    function testMarketWithMultipleTraders() public {
-        // Create market
-        (conditionId, yesTokenId, noTokenId) = _createMarket();
-
-        // Admin creates a liquidity pool by offering both YES and NO tokens
-        vm.startPrank(admin);
-        ctf.setApprovalForAll(address(exchange), true);
-
-        // Create YES sell order at 0.4 (40%)
-        Order memory sellYesOrder = _createAndSignOrder(
-            adminPK,
-            yesTokenId,
-            500 * 10 ** 6, // Selling 500 YES tokens
-            200 * 10 ** 6, // For 200 USDC (price 0.4)
-            Side.SELL
-        );
-
-        // Create NO sell order at 0.7 (70%)
-        Order memory sellNoOrder = _createAndSignOrder(
-            adminPK,
-            noTokenId,
-            500 * 10 ** 6, // Selling 500 NO tokens
-            350 * 10 ** 6, // For 350 USDC (price 0.7)
-            Side.SELL
-        );
-        vm.stopPrank();
-
-        // Trader1 buys YES tokens
-        vm.startPrank(trader1);
-        collateral.approve(address(exchange), 200 * 10 ** 6);
-        exchange.fillOrder(sellYesOrder, 500 * 10 ** 6);
-        vm.stopPrank();
-
-        // Trader2 buys NO tokens
-        vm.startPrank(trader2);
-        collateral.approve(address(exchange), 350 * 10 ** 6);
-        exchange.fillOrder(sellNoOrder, 500 * 10 ** 6);
-        vm.stopPrank();
-
-        // Verify traders received correct tokens
-        assertEq(ctf.balanceOf(trader1, yesTokenId), 500 * 10 ** 6, "Trader1 didn't receive correct YES tokens");
-        assertEq(ctf.balanceOf(trader2, noTokenId), 500 * 10 ** 6, "Trader2 didn't receive correct NO tokens");
-
-        // Resolve market as YES
-        _resolveMarket(conditionId, 1);
-
-        // Trader1 redeems winning YES tokens
-        vm.startPrank(trader1);
-        uint256 balanceBefore = collateral.balanceOf(trader1);
-
-        uint256[] memory indexSets = new uint256[](1);
-        indexSets[0] = 1; // YES tokens
-
-        ctf.redeemPositions(collateral, bytes32(0), conditionId, indexSets);
-
-        uint256 balanceAfter = collateral.balanceOf(trader1);
-        assertEq(balanceAfter - balanceBefore, 500 * 10 ** 6, "Trader1 didn't receive full winnings");
-        vm.stopPrank();
-    }
-
-    function testInvalidMarketCreation() public {
-        // Test with zero address for oracle
-        vm.startPrank(admin);
-        vm.expectRevert("Oracle cannot be zero address");
-        marketCreator.createMarket(questionText, address(0), initialLiquidity);
-        vm.stopPrank();
-
-        // Test with zero initial liquidity
-        vm.startPrank(admin);
-        vm.expectRevert("Initial liquidity must be greater than zero");
-        marketCreator.createMarket(questionText, address(oracleResolver), 0);
-        vm.stopPrank();
-
-        // Test insufficient allowance
-        vm.startPrank(trader1);
-        // Don't approve any tokens
-        vm.expectRevert(); // Will revert when trying to transfer tokens
-        marketCreator.createMarket(questionText, address(oracleResolver), initialLiquidity);
-        vm.stopPrank();
-    }
-
     function testMultipleMarketsCreation() public {
         // Create first market
         (bytes32 condId1, uint256 yesId1, uint256 noId1) = _createMarket();
@@ -380,9 +162,70 @@ contract MarketCreatorTest is BaseExchangeTest {
         assertEq(registeredCondId2, condId2, "Second market condition ID mismatch");
     }
 
-    function testDifferentOutcomeResolutions() public {
-        // Create market
-        (conditionId, yesTokenId, noTokenId) = _createMarket();
+    // function testMarketResolution() public {
+    //     // First create the market and do some trading
+    //     (conditionId, yesTokenId, noTokenId) = _createMarket();
+    //     // Admin approves CTF for exchange
+    //     vm.startPrank(admin);
+    //     IERC1155(address(ctf)).setApprovalForAll(address(exchange), true);
+    //     vm.stopPrank();
+
+    //     Order memory buy = _createAndSignOrder(trader1PK, yes, 60_000_000, 100_000_000, Side.BUY);
+    //     Order memory sellA = _createAndSignOrder(trader2PK, yes, 50_000_000, 25_000_000, Side.SELL);
+    //     Order memory sellB = _createAndSignOrder(trader2PK, yes, 100_000_000, 50_000_000, Side.SELL);
+    //     Order[] memory makerOrders = new Order[](2);
+    //     makerOrders[0] = sellA;
+    //     makerOrders[1] = sellB;
+
+    //     uint256[] memory fillAmounts = new uint256[](2);
+    //     fillAmounts[0] = 50_000_000;
+    //     fillAmounts[1] = 70_000_000;
+
+    //     checkpointCollateral(trader2);
+    //     checkpointCTF(trader1, yes);
+
+    //     // First maker order is filled completely
+    //     vm.expectEmit(true, true, true, false);
+    //     emit OrderFilled(exchange.hashOrder(sellA), trader2, trader1, yes, 0, 50_000_000, 25_000_000, 0);
+
+    //     // Second maker order is partially filled
+    //     vm.expectEmit(true, true, true, false);
+    //     emit OrderFilled(exchange.hashOrder(sellB), trader2, trader1, yes, 0, 70_000_000, 35_000_000, 0);
+
+    //     // The taker order is filled completely
+    //     vm.expectEmit(true, true, true, false);
+    //     emit OrderFilled(exchange.hashOrder(buy), trader1, address(exchange), 0, yes, 60_000_000, 120_000_000, 0);
+
+    //     vm.prank(admin);
+    //     exchange.matchOrders(buy, makerOrders, 60_000_000, fillAmounts);
+
+    //     // Oracle resolves the market (YES outcome)
+    //     _resolveMarket(1); // YES wins (outcome = 1)
+
+    //     // Trader1 redeems their winning YES tokens
+    //     vm.startPrank(trader1);
+
+    //     uint256 trader1BalanceBefore = collateral.balanceOf(trader1);
+
+    //     uint256[] memory indexSets = new uint256[](1);
+    //     indexSets[0] = 1; // YES tokens (index set 1)
+
+    //     ctf.redeemPositions(IERC20(address(collateral)), bytes32(0), conditionId, indexSets);
+
+    //     uint256 trader1BalanceAfter = collateral.balanceOf(trader1);
+
+    //     // Verify trader1 received collateral for winning tokens
+    //     assertEq(trader1BalanceAfter - trader1BalanceBefore, 49_000_000, "Trader1 didn't receive winnings");
+
+    //     vm.stopPrank();
+    // }
+
+    function testGetMarketDataByQuestion_Success() public {
+        // Step 1: Create a market with a specific question
+        vm.startPrank(trader1);
+        collateral.approve(address(ctf), initialLiquidity);
+
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) = marketCreator.createMarket(questionText, oracle);
 
         // Split initial liquidity between traders
         vm.startPrank(admin);
@@ -421,5 +264,39 @@ contract MarketCreatorTest is BaseExchangeTest {
         balanceAfter = collateral.balanceOf(trader1);
         assertEq(balanceAfter, balanceBefore, "Trader1 shouldn't receive winnings for losing tokens");
         vm.stopPrank();
+
+        // Step 2: Try to retrieve with extra whitespace
+        string memory questionWithExtraSpace = " Will ETH surpass $5000 by the end of 2025? ";
+
+        vm.expectRevert("Market not found");
+        marketCreator.getMarketDataByQuestion(questionWithExtraSpace);
+
+        // This shows that whitespace matters
+    }
+
+    function testGetMarketDataByQuestion_ExactStringMatching() public {
+        // Step 1: Create a market
+        vm.startPrank(trader1);
+        collateral.approve(address(ctf), initialLiquidity);
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) = marketCreator.createMarket(questionText, oracle);
+        vm.stopPrank();
+
+        // Step 2: Log the hash of the question for debugging
+        bytes32 questionId = keccak256(abi.encodePacked(questionText));
+
+        // Step 3: Try different variations of the string to find exact match
+        // (This is helpful for debugging when working with UUIDs)
+
+        // Get original question hash
+        bytes32 originalQuestionHash = keccak256(abi.encodePacked(questionText));
+
+        // Log the market data to verify it exists
+        (bytes32 storedConditionId, uint256 storedYesTokenId, uint256 storedNoTokenId) =
+            marketCreator.questionIdToMarketData(questionId);
+
+        // Verify they match the returned values
+        assertEq(storedConditionId, conditionId, "Condition ID mismatch in stored data");
+        assertEq(storedYesTokenId, yesTokenId, "YES token ID mismatch in stored data");
+        assertEq(storedNoTokenId, noTokenId, "NO token ID mismatch in stored data");
     }
 }

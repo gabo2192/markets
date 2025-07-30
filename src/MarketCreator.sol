@@ -17,6 +17,14 @@ contract MarketCreator is Ownable, IERC1155Receiver {
     IERC20 public collateral;
     ICTFExchange public exchange;
     mapping(bytes32 => address) public marketOracles;
+    mapping(bytes32 => MarketData) public questionIdToMarketData;
+
+    struct MarketData {
+        bytes32 conditionId;
+        uint256 yesTokenId;
+        uint256 noTokenId;
+        uint256 initialLiquidity;
+    }
 
     constructor(address _ctf, address _exchange, address _collateral) Ownable(msg.sender) {
         ctf = IConditionalTokens(_ctf);
@@ -29,35 +37,55 @@ contract MarketCreator is Ownable, IERC1155Receiver {
         returns (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId)
     {
         require(oracle != address(0), "Oracle cannot be zero address");
-        require(initialLiquidity > 0, "Initial liquidity must be greater than zero");
+        return _createMarket(question, oracle, initialLiquidity);
+    }
 
+    function createMultipleMarkets(string[] calldata questions, address oracle)
+        external
+        returns (bytes32[] memory conditionIds, uint256[] memory yesTokenIds, uint256[] memory noTokenIds)
+    {
+        require(oracle != address(0), "Oracle cannot be zero address");
+        uint256 length = questions.length;
+
+        conditionIds = new bytes32[](length);
+        yesTokenIds = new uint256[](length);
+        noTokenIds = new uint256[](length);
+
+        for (uint256 i = 0; i < length; i++) {
+            (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) = _createMarket(questions[i], oracle, 0);
+            conditionIds[i] = conditionId;
+            yesTokenIds[i] = yesTokenId;
+            noTokenIds[i] = noTokenId;
+        }
+
+        return (conditionIds, yesTokenIds, noTokenIds);
+    }
+
+    function _createMarket(string memory question, address oracle, uint256 initialLiquidity)
+        internal
+        returns (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId)
+    {
         bytes32 questionId = keccak256(abi.encodePacked(question));
+
         ctf.prepareCondition(oracle, questionId, 2);
         conditionId = ctf.getConditionId(oracle, questionId, 2);
         marketOracles[conditionId] = oracle;
 
-        // Lock collateral
-        collateral.transferFrom(msg.sender, address(this), initialLiquidity);
-        collateral.approve(address(ctf), initialLiquidity);
+        yesTokenId = ctf.getPositionId(collateral, ctf.getCollectionId(bytes32(0), conditionId, 1));
+        noTokenId = ctf.getPositionId(collateral, ctf.getCollectionId(bytes32(0), conditionId, 2));
 
-        uint256[] memory partition = new uint256[](2);
-        partition[0] = 1; // YES token
-        partition[1] = 2; // NO token
+        MarketData memory marketData = MarketData({
+            conditionId: conditionId,
+            yesTokenId: yesTokenId,
+            noTokenId: noTokenId,
+            initialLiquidity: initialLiquidity
+        });
 
-        // Mint YES/NO tokens (held in this contract)
-        ctf.splitPosition((collateral), bytes32(0), conditionId, partition, initialLiquidity);
+        questionIdToMarketData[questionId] = marketData;
 
-        yesTokenId = ctf.getPositionId((collateral), ctf.getCollectionId(bytes32(0), conditionId, 1));
-        noTokenId = ctf.getPositionId((collateral), ctf.getCollectionId(bytes32(0), conditionId, 2));
-
-        // Transfer YES/NO tokens to the user (this line is added)
-        IERC1155(address(ctf)).safeTransferFrom(address(this), msg.sender, yesTokenId, initialLiquidity, "");
-        IERC1155(address(ctf)).safeTransferFrom(address(this), msg.sender, noTokenId, initialLiquidity, "");
-
-        // Directly register tokens in `ICTFExchange`
         exchange.registerToken(yesTokenId, noTokenId, conditionId);
 
-        return (conditionId, yesTokenId, noTokenId);
+        emit MarketCreated(questionId);
     }
 
     function onERC1155Received(address, address, uint256, uint256, bytes calldata)
@@ -81,4 +109,6 @@ contract MarketCreator is Ownable, IERC1155Receiver {
     function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
         return interfaceId == type(IERC1155Receiver).interfaceId;
     }
+
+    event MarketCreated(bytes32 questionId);
 }

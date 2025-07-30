@@ -103,6 +103,15 @@ deploy-all-sei:
 	--private-key ${PRIVATE_KEY} \
 	--broadcast
 
+deploy-all-prod:
+	forge script script/DeployAllProd.s.sol:DeployProduction \
+	--rpc-url ${RPC_URL} \
+	--chain-id ${CHAIN_ID} \
+	--account $(ACCOUNT) \
+	--sender ${SENDER} \
+	--broadcast
+
+
 
 # Default
 all: clean build test

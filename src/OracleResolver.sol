@@ -12,8 +12,8 @@ contract OracleResolver is Ownable {
         ctf = IConditionalTokens(_ctf);
     }
 
-    function resolveMarket(bytes32 conditionId, uint256 outcome) external onlyOwner {
-        require(!resolvedMarkets[conditionId], "Market already resolved");
+    function resolveMarket(bytes32 questionId, uint256 outcome) external onlyOwner {
+        require(!resolvedMarkets[questionId], "Market already resolved");
         require(outcome == 0 || outcome == 1, "Invalid outcome");
 
         uint256[] memory payouts = new uint256[](2);
@@ -21,7 +21,7 @@ contract OracleResolver is Ownable {
         payouts[1] = outcome == 1 ? 0 : 1;
 
         // Submit outcome to CTF
-        ctf.reportPayouts(conditionId, payouts);
-        resolvedMarkets[conditionId] = true;
+        ctf.reportPayouts(questionId, payouts);
+        resolvedMarkets[questionId] = true;
     }
 }
